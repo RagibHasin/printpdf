@@ -445,6 +445,74 @@ impl PdfLayerReference {
             .push(Operation::new("Tj", vec![String(bytes, Hexadecimal)]));
     }
 
+    /// Add complex text to the file at the current position
+    ///
+    /// If the given font is a built-in font and the given text contains characters that are not
+    /// supported by the [Windows-1252][] encoding, these characters will be ignored.
+    ///
+    /// [Windows-1252]: https://en.wikipedia.org/wiki/Windows-1252
+    #[inline]
+    #[cfg(feature = "shaping_allsorts")]
+    pub fn write_complex_text<S: AsRef<str>>(
+        &self,
+        text: S,
+        font: &IndirectFontRef,
+        script: &[u8; 4],
+        lang: Option<&[u8; 4]>,
+    ) {
+        use allsorts::binary::read::ReadScope;
+        use allsorts::tables::OpenTypeFont;
+
+        // NOTE: The unwrap() calls in this function are safe, since
+        // we've already checked the font for validity when it was added to the document
+
+        use lopdf::Object::*;
+        use lopdf::StringFormat::Hexadecimal;
+
+        let text = text.as_ref();
+
+        // we need to transform the characters into glyph ids and then add them to the layer
+        let doc = self.document.upgrade().unwrap();
+        let mut doc = doc.borrow_mut();
+
+        // glyph IDs that make up this string
+
+        // kerning for each glyph id. If no kerning is present, will be 0
+        // must be the same length as list_gid
+        // let mut kerning_data = Vec::<freetype::Vector>::new();
+
+        let bytes: Vec<u8> = {
+            if let Font::ExternalFont(face_direct_ref) = doc.fonts.get_font(font).unwrap().data {
+                let font_buffer = &face_direct_ref.font_bytes;
+                let opentype_file = ReadScope::new(font_buffer)
+                    .read::<OpenTypeFont<'_>>()
+                    .unwrap();
+                let font_table_provider = opentype_file
+                    .table_provider(0)
+                    .expect("error reading font file");
+                let mut font = allsorts::Font::new(Box::new(font_table_provider))
+                    .expect("error reading font data")
+                    .expect("missing required font tables");
+
+                let script_tag = u32::from_be_bytes(*script);
+                let opt_lang_tag = lang.map(|&lang| u32::from_be_bytes(lang));
+
+                let glyphs =
+                    crate::shape::shape_ttf_indic(&mut font, script_tag, opt_lang_tag, text)
+                        .unwrap();
+                glyphs.into_iter().flat_map(u16::to_be_bytes).collect()
+            } else {
+                // For built-in fonts, we selected the WinAnsiEncoding, see the Into<LoDictionary>
+                // implementation for BuiltinFont.
+                lopdf::Document::encode_text(Some("WinAnsiEncoding"), text)
+            }
+        };
+
+        doc.pages[self.page.0].layers[self.layer.0]
+            .operations
+            .push(Operation::new("Tj", vec![String(bytes, Hexadecimal)]));
+    }
+
     /// Saves the current graphic state
     #[inline]
     pub fn save_graphics_state(&self) {

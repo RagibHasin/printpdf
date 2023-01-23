@@ -108,7 +108,9 @@
 //! current_layer.add_shape(line2);
 //! ```
 //!
-#![cfg_attr(feature = "embedded_images", doc = r##"
+#![cfg_attr(
+    feature = "embedded_images",
+    doc = r##"
 ### Adding images
 
 Note: Images only get compressed in release mode. You might get huge PDFs (6 or more MB) in
@@ -162,7 +164,8 @@ fn main() {
     let image2 = Image::from(image_file_2);
 }
 ```
-"##)]
+"##
+)]
 //! ### Adding fonts
 //!
 //! Note: Fonts are shared between pages. This means that they are added to the document first
@@ -349,6 +352,8 @@ pub mod pdf_page;
 pub mod pdf_resources;
 pub mod point;
 pub mod scale;
+#[cfg(feature = "shaping_allsorts")]
+pub(crate) mod shape;
 #[cfg(feature = "svg")]
 pub mod svg;
 pub mod utils;
