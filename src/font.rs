@@ -617,3 +617,6 @@ impl Clone for Box<dyn FontData> {
         self.clone_font_data()
     }
 }
+
+#[cfg(feature = "shaping_swash")]
+pub use swash::{shape::Direction, text::Script};

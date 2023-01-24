@@ -35,6 +35,8 @@ image = { version = "0.24.3", optional = true, default-features = false, feature
 svg2pdf = { version = "0.1.0", optional = true }
 pdf-writer = { version = "0.4.1", optional = true }
 usvg = { version = "0.19.0", optional = true }
+# font shaping with swash
+swash = { version = "0.1.6", default-features = false, optional = true }
 
 [features]
 default = []
@@ -54,6 +56,8 @@ dds = ["image/dds", "embedded_images"]
 webp = ["image/webp", "embedded_images"]
 # enables svg
 svg = ["svg2pdf", "usvg", "pdf-writer"]
+# uses swash for font shaping
+shaping_swash = ["swash"]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -76,6 +80,10 @@ required-features = []
 [[example]]
 name = "font"
 required-features = []
+
+[[example]]
+name = "font_complex_swash"
+required-features = ["shaping_swash"]
 
 [[example]]
 name = "image"

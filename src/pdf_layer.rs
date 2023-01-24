@@ -445,6 +445,89 @@ impl PdfLayerReference {
             .push(Operation::new("Tj", vec![String(bytes, Hexadecimal)]));
     }
 
+    /// Add complex text to the file at the current position
+    ///
+    /// If the given font is a built-in font and the given text contains characters that are not
+    /// supported by the [Windows-1252][] encoding, these characters will be ignored.
+    ///
+    /// [Windows-1252]: https://en.wikipedia.org/wiki/Windows-1252
+    #[inline]
+    #[cfg(feature = "shaping_swash")]
+    pub fn write_complex_text<S: AsRef<str>>(
+        &self,
+        text: S,
+        font: &IndirectFontRef,
+        script: swash::text::Script,
+        direction: swash::shape::Direction,
+    ) {
+        // NOTE: The unwrap() calls in this function are safe, since
+        // we've already checked the font for validity when it was added to the document
+
+        let text = text.as_ref();
+
+        // we need to transform the characters into glyph ids and then add them to the layer
+        let doc = self.document.upgrade().unwrap();
+        let mut doc = doc.borrow_mut();
+
+        // glyph IDs that make up this string
+
+        // kerning for each glyph id. If no kerning is present, will be 0
+        // must be the same length as list_gid
+        // let mut kerning_data = Vec::<freetype::Vector>::new();
+
+        if let Font::ExternalFont(face_direct_ref) = doc.fonts.get_font(font).unwrap().data {
+            let font_buffer = &face_direct_ref.font_bytes;
+            let font = swash::FontRef::from_index(font_buffer, 0).unwrap();
+            let mut context = swash::shape::ShapeContext::new();
+            let mut shaper = context
+                .builder(font)
+                .script(script)
+                .direction(direction)
+                .build();
+            shaper.add_str(text);
+
+            #[derive(Debug)]
+            enum Op {
+                Glyphs(Vec<u8>),
+                Offset(i64),
+            }
+
+            let mut operands = Vec::new();
+            let mut glyph_stream = Vec::new();
+            shaper.shape_with(|cluster| {
+                for glyph in cluster.glyphs {
+                    if glyph.x != 0.0 {
+                        operands.push(Op::Glyphs(std::mem::take(&mut glyph_stream)));
+                        operands.push(Op::Offset(-glyph.x as _));
+                        operands.push(Op::Glyphs(glyph.id.to_be_bytes().to_vec()));
+                        operands.push(Op::Offset(glyph.x as _));
+                    } else {
+                        glyph_stream.extend(glyph.id.to_be_bytes());
+                    }
+                }
+            });
+            if !glyph_stream.is_empty() {
+                operands.push(Op::Glyphs(glyph_stream));
+            }
+
+            let operands = lopdf::Object::Array(
+                operands
+                    .into_iter()
+                    .map(|op| match op {
+                        Op::Glyphs(glyph_stream) => {
+                            lopdf::Object::String(glyph_stream, lopdf::StringFormat::Hexadecimal)
+                        }
+                        Op::Offset(offset) => lopdf::Object::Integer(offset),
+                    })
+                    .collect(),
+            );
+
+            doc.pages[self.page.0].layers[self.layer.0]
+                .operations
+                .push(Operation::new("TJ", vec![operands]));
+        }
+    }
+
     /// Saves the current graphic state
     #[inline]
     pub fn save_graphics_state(&self) {
