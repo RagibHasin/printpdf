@@ -461,13 +461,14 @@ impl PdfLayerReference {
         lang: Option<&[u8; 4]>,
     ) {
         use allsorts::binary::read::ReadScope;
+        use allsorts::font::MatchingPresentation;
+        use allsorts::glyph_position::{GlyphLayout, GlyphPosition, TextDirection};
+        use allsorts::gpos::Info;
+        use allsorts::gsub::{Features, RawGlyph};
         use allsorts::tables::OpenTypeFont;
 
         // NOTE: The unwrap() calls in this function are safe, since
         // we've already checked the font for validity when it was added to the document
-
-        use lopdf::Object::*;
-        use lopdf::StringFormat::Hexadecimal;
 
         let text = text.as_ref();
 
@@ -481,36 +482,74 @@ impl PdfLayerReference {
         // must be the same length as list_gid
         // let mut kerning_data = Vec::<freetype::Vector>::new();
 
-        let bytes: Vec<u8> = {
-            if let Font::ExternalFont(face_direct_ref) = doc.fonts.get_font(font).unwrap().data {
-                let font_buffer = &face_direct_ref.font_bytes;
-                let opentype_file = ReadScope::new(font_buffer)
-                    .read::<OpenTypeFont<'_>>()
-                    .unwrap();
-                let font_table_provider = opentype_file
-                    .table_provider(0)
-                    .expect("error reading font file");
-                let mut font = allsorts::Font::new(Box::new(font_table_provider))
-                    .expect("error reading font data")
-                    .expect("missing required font tables");
+        if let Font::ExternalFont(face_direct_ref) = doc.fonts.get_font(font).unwrap().data {
+            let font_buffer = &face_direct_ref.font_bytes;
+            let opentype_file = ReadScope::new(font_buffer)
+                .read::<OpenTypeFont<'_>>()
+                .unwrap();
+            let font_table_provider = opentype_file
+                .table_provider(0)
+                .expect("error reading font file");
+            let mut font = allsorts::Font::new(Box::new(font_table_provider))
+                .expect("error reading font data")
+                .expect("missing required font tables");
 
-                let script_tag = u32::from_be_bytes(*script);
-                let opt_lang_tag = lang.map(|&lang| u32::from_be_bytes(lang));
+            let script_tag = u32::from_be_bytes(*script);
+            let opt_lang_tag = lang.map(|&lang| u32::from_be_bytes(lang));
 
-                let glyphs =
-                    crate::shape::shape_ttf_indic(&mut font, script_tag, opt_lang_tag, text)
-                        .unwrap();
-                glyphs.into_iter().flat_map(u16::to_be_bytes).collect()
-            } else {
-                // For built-in fonts, we selected the WinAnsiEncoding, see the Into<LoDictionary>
-                // implementation for BuiltinFont.
-                lopdf::Document::encode_text(Some("WinAnsiEncoding"), text)
+            let glyphs = font.map_glyphs(text, script_tag, MatchingPresentation::NotRequired);
+            let Ok(infos) = font.shape(glyphs, script_tag, opt_lang_tag, &Features::default(), true)
+            else { return; };
+
+            let mut layout = GlyphLayout::new(&mut font, &infos, TextDirection::LeftToRight, false);
+            let positions = layout.glyph_positions().unwrap();
+
+            #[derive(Debug)]
+            enum Op {
+                Glyphs(Vec<u8>),
+                Offset(i64),
             }
-        };
 
-        doc.pages[self.page.0].layers[self.layer.0]
-            .operations
-            .push(Operation::new("Tj", vec![String(bytes, Hexadecimal)]));
+            let mut operands = Vec::new();
+            let mut glyph_stream = Vec::new();
+
+            for (
+                Info {
+                    glyph: RawGlyph { glyph_index, .. },
+                    ..
+                },
+                GlyphPosition { x_offset, .. },
+            ) in infos.into_iter().zip(positions)
+            {
+                if x_offset != 0 {
+                    operands.push(Op::Glyphs(std::mem::take(&mut glyph_stream)));
+                    operands.push(Op::Offset(-x_offset as _));
+                    operands.push(Op::Glyphs(glyph_index.to_be_bytes().to_vec()));
+                    operands.push(Op::Offset(x_offset as _));
+                } else {
+                    glyph_stream.extend(glyph_index.to_be_bytes());
+                }
+            }
+            if !glyph_stream.is_empty() {
+                operands.push(Op::Glyphs(glyph_stream));
+            }
+
+            let operands = lopdf::Object::Array(
+                operands
+                    .into_iter()
+                    .map(|op| match op {
+                        Op::Glyphs(glyph_stream) => {
+                            lopdf::Object::String(glyph_stream, lopdf::StringFormat::Hexadecimal)
+                        }
+                        Op::Offset(offset) => lopdf::Object::Integer(offset),
+                    })
+                    .collect(),
+            );
+
+            doc.pages[self.page.0].layers[self.layer.0]
+                .operations
+                .push(Operation::new("TJ", vec![operands]));
+        }
     }
 
     /// Saves the current graphic state
